@@ -1,0 +1,3 @@
+CREATE SEQUENCE short_url_code_seq
+START WITH 1
+CACHE 50;
