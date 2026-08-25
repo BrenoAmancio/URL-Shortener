@@ -1,20 +1,17 @@
 package com.breno.urlshortener.url.controller;
 
-import com.breno.urlshortener.url.dto.CreateUrlRequest;
-import com.breno.urlshortener.url.dto.CreateUrlResponse;
-import com.breno.urlshortener.url.dto.UrlResponse;
+import com.breno.urlshortener.url.dto.CreateUrlRequestDTO;
+import com.breno.urlshortener.url.dto.CreateUrlResponseDTO;
+import com.breno.urlshortener.url.dto.UrlResponseDTO;
 import com.breno.urlshortener.url.service.UrlService;
-import org.slf4j.ILoggerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
-import java.time.Instant;
 
 @RestController
 public class UrlController {
@@ -30,26 +27,22 @@ public class UrlController {
     public ResponseEntity<Void> redirect(@PathVariable String shortCode) {
         String originalUrl = urlService.getOriginalUrl(shortCode);
 
-        if (originalUrl == null) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
-        }
-
         return ResponseEntity.status(HttpStatus.FOUND)
                 .location(URI.create(originalUrl))
                 .build();
     }
 
     @PostMapping("/api/create")
-    public UrlResponse createShortUrl(@RequestBody CreateUrlRequest dto) {
-        logger.debug("DTO Request: " + dto);
-        CreateUrlResponse urlShorted = this.urlService.createShortUrl(dto);
+    public UrlResponseDTO createShortUrl(@RequestBody CreateUrlRequestDTO dto) {
+        CreateUrlResponseDTO urlShorted = this.urlService.createShortUrl(dto);
 
-        return new UrlResponse(
+        return new UrlResponseDTO(
                 urlShorted.id(),
                 urlShorted.shortCode(),
                 dto.url(),
                 urlShorted.urlShort(),
-                Instant.now(),
-                Instant.now());
+                urlShorted.createdAt(),
+                urlShorted.expiresAt()
+        );
     }
 }
