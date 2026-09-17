@@ -9,13 +9,14 @@ services:
     ports:
       - "${DB_PORT}:5432"
   rabbitmq:
-    image: 'rabbitmq:latest'
+    image: 'rabbitmq:management'
     container_name: 'url_shortener_rebbitmq'
     environment:
-      - RABBITMQ_DEFAULT_PASS=${RQM_PSWD}
-      - RABBITMQ_DEFAULT_USER=${RQM_USER}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER}
     ports:
-      - '5672'
+      - '5672:5672'
+      - '15672:15672'
   redis:
     image: 'redis:latest'
     container_name: 'url_shortener_redis'

@@ -1,5 +1,8 @@
 package com.breno.urlshortener.url.service;
 
+import com.breno.urlshortener.analytics.AnalyticsProducer;
+import com.breno.urlshortener.analytics.DTO.UrlAnalyticsEventDTO;
+import com.breno.urlshortener.analytics.enums.UrlAnalyticsEventENUM;
 import com.breno.urlshortener.url.dto.CreateUrlRequestDTO;
 import com.breno.urlshortener.url.dto.CreateUrlResponseDTO;
 import com.breno.urlshortener.url.dto.ShortUrlCacheDTO;
@@ -9,14 +12,13 @@ import com.breno.urlshortener.url.exception.URLNotFoundException;
 import com.breno.urlshortener.url.exception.UrlCodeConflictException;
 import com.breno.urlshortener.url.exception.UrlShorteningException;
 import com.breno.urlshortener.url.respository.UrlRepository;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
-import java.time.Duration;
 import java.time.Instant;
 
 @Service
@@ -24,22 +26,30 @@ public class UrlService {
 
     private final UrlRepository urlRepository;
     private final CodeService codeService;
-    private final RedisTemplate<String, ShortUrlCacheDTO> redisTemplate;
     private final Logger logger = LoggerFactory.getLogger(UrlService.class);
     private static final String CACHE_PREFIX = "shorturl:";
+    private final CacheService cacheService;
+    private final AnalyticsProducer producer;
 
     @Value("${server.domain}")
     private String domain;
 
-    public UrlService(UrlRepository userRepository, CodeService codeService, RedisTemplate<String, ShortUrlCacheDTO> redisTemplate) {
+    public UrlService(
+            UrlRepository userRepository,
+            CodeService codeService,
+            CacheService cacheService,
+            AnalyticsProducer producer
+    ) {
         this.urlRepository = userRepository;
         this.codeService = codeService;
-        this.redisTemplate = redisTemplate;
+        this.cacheService = cacheService;
+        this.producer = producer;
     }
 
     public CreateUrlResponseDTO createShortUrl(CreateUrlRequestDTO dto) {
         Instant expiresAt = (dto.expiresAt() != null) ? dto.expiresAt().toInstant() : null;
         String code = codeService.generate();
+        HttpServletRequest request = dto.request();
 
         ShortUrl shortUrl = new ShortUrl(
             code,
@@ -60,6 +70,18 @@ public class UrlService {
 
         logger.info("Short URL created successfully: id={}, code={}", saved.getId(), saved.getCode());
 
+        String key = CACHE_PREFIX + saved.getCode();
+        cacheService.tryCacheShortUrl(key, saved);
+
+        producer.publish(new UrlAnalyticsEventDTO(
+                saved.getId(),
+                UrlAnalyticsEventENUM.CREATED,
+                Instant.now(),
+                getIpAddress(request),
+                request.getHeader("User-Agent"),
+                request.getHeader("Referer")
+        ));
+
         return new CreateUrlResponseDTO(
                 saved.getId(),
                 saved.getCode(),
@@ -69,15 +91,24 @@ public class UrlService {
         );
     }
 
-    public String getOriginalUrl(String shortCode) {
+    public String getOriginalUrl(String shortCode, HttpServletRequest request) {
         String key = CACHE_PREFIX + shortCode;
 
-        ShortUrlCacheDTO cached = tryGetCache(key);
+        ShortUrlCacheDTO cached = cacheService.tryGetCache(key);
         if(cached != null) {
             if (cached.expiresAt() != null && cached.expiresAt().isBefore(Instant.now())) {
-                tryDeleteCache(key);
+                cacheService.tryDeleteCache(key);
                 return null;
             }
+
+            this.producer.publish(new UrlAnalyticsEventDTO(
+                    cached.id(),
+                    UrlAnalyticsEventENUM.ACCESSED,
+                    Instant.now(),
+                    getIpAddress(request),
+                    request.getHeader("User-Agent"),
+                    request.getHeader("Referer")
+            ));
 
             return cached.originalUrl();
         }
@@ -92,53 +123,24 @@ public class UrlService {
             throw new ShortUrlExpiredException(shortCode);
         }
 
+        this.producer.publish(new UrlAnalyticsEventDTO(
+                shortUrl.getId(),
+                UrlAnalyticsEventENUM.ACCESSED,
+                Instant.now(),
+                getIpAddress(request),
+                request.getHeader("User-Agent"),
+                request.getHeader("Referer")
+        ));
+
         logger.debug("Resolved short code {} -> {}", shortCode, shortUrl.getOriginalUrl());
-        tryCacheShortUrl(key, shortUrl);
+        cacheService.tryCacheShortUrl(key, shortUrl);
         return shortUrl.getOriginalUrl();
     }
 
-    private void tryCacheShortUrl (String key, ShortUrl shortUrl) {
-        try {
-            ShortUrlCacheDTO dto = new ShortUrlCacheDTO(shortUrl.getOriginalUrl(), shortUrl.getExpiresAt());
-            Duration ttl = (shortUrl.getExpiresAt() != null) ? Duration.between(Instant.now(), shortUrl.getExpiresAt()) : Duration.ofHours(24);
-
-            if (ttl.isNegative() || ttl.isZero()) {
-                logger.debug("Invalid TTL to code {}, it wont be cached", shortUrl.getCode());
-                return;
-            }
-
-            redisTemplate.opsForValue().set(key, dto, ttl);
-            logger.debug("Cached code '{}' with ttl={}", shortUrl.getCode(), ttl);
-        } catch (Exception e) {
-            logger.warn("Failed to cache short URL: code={}", shortUrl.getCode(), e);
-        }
-    }
-
-    private ShortUrlCacheDTO tryGetCache(String key) {
-        try {
-//            return redisTemplate.opsForValue().get(key);
-            logger.debug("Trying to get key from Redis: '{}'", key);
-
-            ShortUrlCacheDTO cached = redisTemplate.opsForValue().get(key);
-
-            logger.debug("Redis result for key {}: '{}'", key, cached);
-
-            return cached;
-        } catch (Exception e) {
-            logger.warn("Failed to get key {} from Redis", key, e);
-            return null;
-        }
-    }
-
-    private void tryDeleteCache(String key) {
-        try {
-            logger.debug("Deleting key from Redis: '{}'", key);
-
-            Boolean deleted = redisTemplate.delete(key);
-
-            logger.debug("Key {} deleted from Redis: '{}'", key, deleted);
-        } catch (Exception e) {
-            logger.warn("Failed to delete key {} from Redis", key, e);
-        }
+    private String getIpAddress(HttpServletRequest request) {
+        String forwardedFor = request.getHeader("X-Forwarded-For");
+        return (forwardedFor != null && !forwardedFor.isBlank())
+                ? forwardedFor.split(",")[0].trim()
+                : request.getRemoteAddr();
     }
 }
